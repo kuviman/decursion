@@ -22,6 +22,7 @@
           packages = with pkgs; [
             rust-toolchain
             rust-analyzer
+            just
           ];
           shellHook = ''
           '';

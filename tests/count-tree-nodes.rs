@@ -27,10 +27,10 @@ async fn total_nodes(mut tree: Tree) -> usize {
     result
 }
 
-fn broken_total_nodes(mut tree: Tree) -> usize {
+fn recursive_total_nodes(mut tree: Tree) -> usize {
     let mut result = 1;
     for child in std::mem::take(&mut tree.children) {
-        result += broken_total_nodes(child);
+        result += recursive_total_nodes(child);
     }
     result
 }
@@ -49,9 +49,9 @@ fn construct_tree() -> Tree {
 
 #[test]
 #[ignore = "this test stack overflows"]
-fn test_broken() {
+fn test_overflow() {
     let tree = construct_tree();
-    assert_eq!(broken_total_nodes(tree), N * 2 + 1);
+    assert_eq!(recursive_total_nodes(tree), N * 2 + 1);
 }
 
 #[test]
