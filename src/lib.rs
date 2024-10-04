@@ -78,7 +78,9 @@ where
     fn decurse(self) -> RecursedFuture<F::Output> {
         let (mut sender, receiver) = async_oneshot::oneshot();
         if !DECURSER.is_set() {
-            panic!("You can only decurse when inside a decursing context");
+            panic!(
+                "You can only decurse when inside a decursing context: run with `run_decursing`"
+            );
         }
         DECURSER.with(|decurser| {
             let mut decurser = decurser.borrow_mut();
