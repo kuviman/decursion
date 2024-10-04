@@ -1,4 +1,3 @@
-use future::LocalBoxFuture;
 use futures::prelude::*;
 use scoped_tls_hkt::scoped_thread_local;
 use std::cell::UnsafeCell;
@@ -7,7 +6,10 @@ use std::marker::PhantomData;
 use std::task::Poll;
 
 pub struct Decurser {
-    call_stack: Vec<UnsafeCell<LocalBoxFuture<'static, ()>>>,
+    // TODO drops?
+    allocator: bumpalo::Bump,
+    // this is not actually static KEKW
+    call_stack: Vec<*mut dyn Future<Output = ()>>,
     returned_value: Vec<u8>,
 }
 
@@ -15,19 +17,18 @@ impl Decurser {
     unsafe fn push(this: &UnsafeCell<Self>, future: impl Future + 'static) {
         let this_ptr = this.get();
         let this = &mut *this_ptr;
-        this.call_stack.push(UnsafeCell::new(
-            future
-                .map(move |result| {
-                    let this = &mut *this_ptr;
-                    let memory_needed = std::mem::size_of_val(&result);
-                    let current_memory = this.returned_value.capacity();
-                    if memory_needed > current_memory {
-                        this.returned_value.reserve(memory_needed - current_memory);
-                    }
-                    std::ptr::write_unaligned(this.returned_value.as_mut_ptr() as *mut _, result);
-                })
-                .boxed_local(),
-        ))
+        this.call_stack.push({
+            let future = future.map(move |result| {
+                let this = &mut *this_ptr;
+                let memory_needed = std::mem::size_of_val(&result);
+                let current_memory = this.returned_value.capacity();
+                if memory_needed > current_memory {
+                    this.returned_value.reserve(memory_needed - current_memory);
+                }
+                std::ptr::write_unaligned(this.returned_value.as_mut_ptr() as *mut _, result);
+            });
+            this.allocator.alloc(future) as *mut _ as *mut dyn Future<Output = ()>
+        })
     }
     unsafe fn get_returned_value<T>(this: &UnsafeCell<Self>) -> T {
         let this = &mut *this.get();
@@ -37,6 +38,7 @@ impl Decurser {
 
 pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
     let decurser = UnsafeCell::new(Decurser {
+        allocator: bumpalo::Bump::new(),
         call_stack: Vec::new(),
         returned_value: Vec::new(),
     });
@@ -47,10 +49,12 @@ pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         loop {
-            let Some(f) = unsafe { &mut *decurser.get() }.call_stack.last() else {
+            let Some(f) = unsafe { &mut *decurser.get() }.call_stack.last().copied() else {
                 break;
             };
-            match unsafe { &mut *f.get() }.poll_unpin(&mut cx) {
+            let f = std::pin::pin!(f);
+            let f = unsafe { f.map_unchecked_mut(|f| &mut **f) };
+            match f.poll(&mut cx) {
                 std::task::Poll::Ready(()) => {
                     // the innermost function in the call stack has exited
                     unsafe { &mut *decurser.get() }.call_stack.pop();
