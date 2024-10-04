@@ -1,37 +1,32 @@
 use future::LocalBoxFuture;
 use futures::prelude::*;
 use scoped_tls_hkt::scoped_thread_local;
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::future::Future;
-use std::rc::Rc;
 
 pub struct Decurser {
-    call_stack: Vec<Rc<RefCell<LocalBoxFuture<'static, ()>>>>,
+    call_stack: Vec<UnsafeCell<LocalBoxFuture<'static, ()>>>,
 }
 
 pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
     let (mut sender, receiver) = async_oneshot::oneshot();
-    let decurser = RefCell::new(Decurser {
-        call_stack: vec![Rc::new(RefCell::new(
+    let decurser = UnsafeCell::new(Decurser {
+        call_stack: vec![UnsafeCell::new(
             f.map(move |result| sender.send(result).unwrap())
                 .boxed_local(),
-        ))],
+        )],
     });
     DECURSER.set(&decurser, || {
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         loop {
-            let decurser_ref = decurser.borrow();
-            let Some(f) = decurser_ref.call_stack.last() else {
+            let Some(f) = unsafe { &mut *decurser.get() }.call_stack.last() else {
                 break;
             };
-            let f = Rc::clone(f);
-            std::mem::drop(decurser_ref);
-
-            match f.borrow_mut().poll_unpin(&mut cx) {
+            match unsafe { &mut *f.get() }.poll_unpin(&mut cx) {
                 std::task::Poll::Ready(()) => {
                     // the innermost function in the call stack has exited
-                    decurser.borrow_mut().call_stack.pop();
+                    unsafe { &mut *decurser.get() }.call_stack.pop();
                 }
                 std::task::Poll::Pending => {
                     // this should mean that we have called inner function with decurse
@@ -42,7 +37,7 @@ pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
     })
 }
 
-scoped_thread_local!(static DECURSER: RefCell<Decurser>);
+scoped_thread_local!(static DECURSER: UnsafeCell<Decurser>);
 
 pub struct RecursedFuture<T>(async_oneshot::Receiver<T>);
 
@@ -75,10 +70,10 @@ where
             panic!("You can only decurse when inside a decursing context");
         }
         DECURSER.with(|decurser| {
-            let mut decurser = decurser.borrow_mut();
-            decurser.call_stack.push(Rc::new(RefCell::new(Box::pin(
+            let decurser = unsafe { &mut *decurser.get() };
+            decurser.call_stack.push(UnsafeCell::new(Box::pin(
                 self.map(move |result| sender.send(result).unwrap()),
-            ))));
+            )));
         });
         receiver.map(|result| result.unwrap()).boxed_local()
     }
