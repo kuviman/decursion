@@ -53,26 +53,26 @@ fn broken_total_nodes(tree: Tree) -> usize {
     }
 }
 
-#[test]
-#[ignore = "this test stack overflows"]
-fn test_broken() {
+const N: usize = 1_000_000;
+
+fn construct_tree() -> Tree {
     let mut tree = Tree::Leaf;
-    const N: usize = 1_000_000;
     for _ in 0..N {
         tree = Tree::InnerNode(vec![tree, Tree::Leaf].into());
     }
+    tree
+}
+
+#[test]
+#[ignore = "this test stack overflows"]
+fn test_broken() {
+    let tree = construct_tree();
     assert_eq!(broken_total_nodes(tree), N * 2 + 1);
 }
 
 #[test]
 fn test_decursed() {
-    let start = std::time::Instant::now();
-    let mut tree = Tree::Leaf;
-    const N: usize = 1_000_000;
-    for _ in 0..N {
-        tree = Tree::InnerNode(vec![tree, Tree::Leaf].into());
-    }
-    println!("constructed tree in {:?}", start.elapsed());
+    let tree = construct_tree();
     let start = std::time::Instant::now();
     assert_eq!(run_decursing(total_nodes(tree)), N * 2 + 1);
     println!("finished in {:?}", start.elapsed());
