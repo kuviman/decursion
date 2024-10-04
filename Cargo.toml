@@ -3,8 +3,10 @@ name = "decursion"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+debug = true
+
 [dependencies]
-async-oneshot = "0.5.9"
 futures = "0.3.30"
 futures-lite = "2.3.0"
 scoped-tls-hkt = "0.1.5"

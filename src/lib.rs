@@ -6,16 +6,39 @@ use std::future::Future;
 
 pub struct Decurser {
     call_stack: Vec<UnsafeCell<LocalBoxFuture<'static, ()>>>,
+    returned_value: Vec<u8>,
+}
+
+impl Decurser {
+    unsafe fn push(this: &UnsafeCell<Self>, future: impl Future) {
+        let this = &mut *this.get();
+        this.call_stack.push(UnsafeCell::new(
+            future
+                .map(move |result| {
+                    let memory_needed = std::mem::size_of_val(&result);
+                    let current_memory = this.returned_value.capacity();
+                    if memory_needed > current_memory {
+                        this.returned_value.reserve(memory_needed - current_memory);
+                    }
+                    std::ptr::write_unaligned(this.returned_value.as_mut_ptr() as *mut _, result);
+                })
+                .boxed_local(),
+        ))
+    }
+    unsafe fn get_returned_value<T>(this: &UnsafeCell<Self>) -> T {
+        let this = &mut *this.get();
+        std::ptr::read_unaligned(this.returned_value.as_ptr() as *const T)
+    }
 }
 
 pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
-    let (mut sender, receiver) = async_oneshot::oneshot();
     let decurser = UnsafeCell::new(Decurser {
-        call_stack: vec![UnsafeCell::new(
-            f.map(move |result| sender.send(result).unwrap())
-                .boxed_local(),
-        )],
+        call_stack: Vec::new(),
+        returned_value: Vec::new(),
     });
+    unsafe {
+        Decurser::push(&decurser, f);
+    }
     DECURSER.set(&decurser, || {
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
@@ -33,7 +56,7 @@ pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
                 }
             };
         }
-        receiver.try_recv().map_err(|_| ()).unwrap()
+        unsafe { &mut *decurser.get() }.get_returned_value()
     })
 }
 
@@ -57,15 +80,14 @@ impl<T> Future for RecursedFuture<T> {
 }
 
 pub trait FutureExt: Future {
-    fn decurse(self) -> LocalBoxFuture<'static, Self::Output>;
+    fn decurse(self) -> RecursedFuture<<Self as Future>::Output>;
 }
 
 impl<F: Future> FutureExt for F
 where
     Self: 'static,
 {
-    fn decurse(self) -> LocalBoxFuture<'static, Self::Output> {
-        let (mut sender, receiver) = async_oneshot::oneshot();
+    fn decurse(self) -> RecursedFuture<<F as Future>::Output> {
         if !DECURSER.is_set() {
             panic!("You can only decurse when inside a decursing context");
         }
@@ -75,6 +97,6 @@ where
                 self.map(move |result| sender.send(result).unwrap()),
             )));
         });
-        receiver.map(|result| result.unwrap()).boxed_local()
+        RecursedFuture(receiver)
     }
 }

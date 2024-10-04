@@ -16,9 +16,9 @@ impl Drop for Children {
 
 impl IntoIterator for Children {
     type Item = Tree;
-    type IntoIter = Box<dyn Iterator<Item = Tree>>;
+    type IntoIter = <Vec<Tree> as IntoIterator>::IntoIter;
     fn into_iter(mut self) -> Self::IntoIter {
-        Box::new(std::mem::take(&mut self.0).into_iter())
+        std::mem::take(&mut self.0).into_iter()
     }
 }
 
