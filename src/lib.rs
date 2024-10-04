@@ -13,8 +13,12 @@ pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
     let (mut sender, receiver) = async_oneshot::oneshot();
     let decurser = RefCell::new(Decurser {
         call_stack: vec![Rc::new(RefCell::new(
-            f.map(move |result| sender.send(result).unwrap())
-                .boxed_local(),
+            f.map(move |result| {
+                sender.send(result).expect(
+                    "the root decursing future is completed from outside of run_decursing???",
+                )
+            })
+            .boxed_local(),
         ))],
     });
     DECURSER.set(&decurser, || {
@@ -38,7 +42,10 @@ pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
                 }
             };
         }
-        receiver.try_recv().map_err(|_| ()).unwrap()
+        receiver
+            .try_recv()
+            .map_err(|_| ())
+            .expect("run_decursing is completed but the future was dropped???")
     })
 }
 
@@ -61,24 +68,28 @@ impl<T> Future for RecursedFuture<T> {
 }
 
 pub trait FutureExt: Future {
-    fn decurse(self) -> LocalBoxFuture<'static, Self::Output>;
+    fn decurse(self) -> RecursedFuture<Self::Output>;
 }
 
 impl<F: Future> FutureExt for F
 where
     Self: 'static,
 {
-    fn decurse(self) -> LocalBoxFuture<'static, Self::Output> {
+    fn decurse(self) -> RecursedFuture<F::Output> {
         let (mut sender, receiver) = async_oneshot::oneshot();
         if !DECURSER.is_set() {
             panic!("You can only decurse when inside a decursing context");
         }
         DECURSER.with(|decurser| {
             let mut decurser = decurser.borrow_mut();
-            decurser.call_stack.push(Rc::new(RefCell::new(Box::pin(
-                self.map(move |result| sender.send(result).unwrap()),
-            ))));
+            decurser
+                .call_stack
+                .push(Rc::new(RefCell::new(Box::pin(self.map(move |result| {
+                    sender
+                        .send(result)
+                        .expect("the caller of decursed was dropped???")
+                })))));
         });
-        receiver.map(|result| result.unwrap()).boxed_local()
+        RecursedFuture(receiver)
     }
 }
