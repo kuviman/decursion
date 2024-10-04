@@ -53,11 +53,10 @@ impl<T> Future for RecursedFuture<T> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        unsafe {
-            self.map_unchecked_mut(|this| &mut this.0)
-                .poll(cx)
-                .map(|result| result.expect("the sender was dropped???"))
-        }
+        self.get_mut()
+            .0
+            .poll_unpin(cx)
+            .map(|result| result.expect("the sender was dropped???"))
     }
 }
 
