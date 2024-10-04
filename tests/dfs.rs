@@ -66,10 +66,14 @@ fn test_broken() {
 
 #[test]
 fn test_decursed() {
+    let start = std::time::Instant::now();
     let mut tree = Tree::Leaf;
     const N: usize = 1_000_000;
     for _ in 0..N {
         tree = Tree::InnerNode(vec![tree, Tree::Leaf].into());
     }
+    println!("constructed tree in {:?}", start.elapsed());
+    let start = std::time::Instant::now();
     assert_eq!(run_decursing(total_nodes(tree)), N * 2 + 1);
+    println!("finished in {:?}", start.elapsed());
 }
