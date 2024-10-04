@@ -22,6 +22,8 @@
           packages = with pkgs; [
             rust-toolchain
             rust-analyzer
+            gcc
+            just
             cargo-flamegraph
           ];
           shellHook = ''
