@@ -3,6 +3,8 @@ use futures::prelude::*;
 use scoped_tls_hkt::scoped_thread_local;
 use std::cell::UnsafeCell;
 use std::future::Future;
+use std::marker::PhantomData;
+use std::task::Poll;
 
 pub struct Decurser {
     call_stack: Vec<UnsafeCell<LocalBoxFuture<'static, ()>>>,
@@ -10,11 +12,13 @@ pub struct Decurser {
 }
 
 impl Decurser {
-    unsafe fn push(this: &UnsafeCell<Self>, future: impl Future) {
-        let this = &mut *this.get();
+    unsafe fn push(this: &UnsafeCell<Self>, future: impl Future + 'static) {
+        let this_ptr = this.get();
+        let this = &mut *this_ptr;
         this.call_stack.push(UnsafeCell::new(
             future
                 .map(move |result| {
+                    let this = &mut *this_ptr;
                     let memory_needed = std::mem::size_of_val(&result);
                     let current_memory = this.returned_value.capacity();
                     if memory_needed > current_memory {
@@ -56,25 +60,33 @@ pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
                 }
             };
         }
-        unsafe { &mut *decurser.get() }.get_returned_value()
+        unsafe { Decurser::get_returned_value(&decurser) }
     })
 }
 
 scoped_thread_local!(static DECURSER: UnsafeCell<Decurser>);
 
-pub struct RecursedFuture<T>(async_oneshot::Receiver<T>);
+pub struct RecursedFuture<T> {
+    polled: bool,
+    phantom_data: PhantomData<T>,
+}
 
 impl<T> Future for RecursedFuture<T> {
     type Output = T;
-
     fn poll(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        unsafe {
-            self.map_unchecked_mut(|this| &mut this.0)
-                .poll(cx)
-                .map(|result| result.expect("the sender was dropped???"))
+        match self.polled {
+            false => {
+                unsafe {
+                    self.get_unchecked_mut().polled = true;
+                }
+                Poll::Pending
+            }
+            true => Poll::Ready(
+                DECURSER.with(|decurser| unsafe { Decurser::get_returned_value(decurser) }),
+            ),
         }
     }
 }
@@ -92,11 +104,11 @@ where
             panic!("You can only decurse when inside a decursing context");
         }
         DECURSER.with(|decurser| {
-            let decurser = unsafe { &mut *decurser.get() };
-            decurser.call_stack.push(UnsafeCell::new(Box::pin(
-                self.map(move |result| sender.send(result).unwrap()),
-            )));
+            unsafe { Decurser::push(decurser, self) };
         });
-        RecursedFuture(receiver)
+        RecursedFuture {
+            polled: false,
+            phantom_data: PhantomData,
+        }
     }
 }

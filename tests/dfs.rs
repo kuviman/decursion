@@ -67,7 +67,9 @@ fn construct_tree() -> Tree {
 #[ignore = "this test stack overflows"]
 fn test_broken() {
     let tree = construct_tree();
+    let start = std::time::Instant::now();
     assert_eq!(broken_total_nodes(tree), N * 2 + 1);
+    println!("finished in {:?}", start.elapsed());
 }
 
 #[test]
