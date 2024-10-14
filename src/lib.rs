@@ -3,23 +3,36 @@ use futures::prelude::*;
 use scoped_tls_hkt::scoped_thread_local;
 use std::cell::RefCell;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 pub struct Decurser {
+    /// not actually static
     call_stack: Vec<Rc<RefCell<LocalBoxFuture<'static, ()>>>>,
 }
 
-pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
-    let (mut sender, receiver) = async_oneshot::oneshot();
-    let decurser = RefCell::new(Decurser {
-        call_stack: vec![Rc::new(RefCell::new(
-            f.map(move |result| {
+fn save_to_call_stack<T>(
+    mut sender: async_oneshot::Sender<T>,
+    f: impl Future<Output = T>,
+) -> Rc<RefCell<LocalBoxFuture<'static, ()>>> {
+    Rc::new(RefCell::new({
+        let future = f
+            .map(move |result| {
                 sender.send(result).expect(
                     "the root decursing future is completed from outside of run_decursing???",
                 )
             })
-            .boxed_local(),
-        ))],
+            .boxed_local();
+        unsafe {
+            std::mem::transmute::<LocalBoxFuture<'_, ()>, LocalBoxFuture<'static, ()>>(future)
+        }
+    }))
+}
+
+pub fn run_decursing<'a, T: 'a>(f: impl Future<Output = T> + 'a) -> T {
+    let (sender, receiver) = async_oneshot::oneshot();
+    let decurser = RefCell::new(Decurser {
+        call_stack: vec![save_to_call_stack(sender, f)],
     });
     DECURSER.set(&decurser, || {
         let waker = futures::task::noop_waker();
@@ -51,32 +64,35 @@ pub fn run_decursing<T: 'static>(f: impl Future<Output = T> + 'static) -> T {
 
 scoped_thread_local!(static DECURSER: RefCell<Decurser>);
 
-pub struct RecursedFuture<T>(async_oneshot::Receiver<T>);
+pub struct DecursedFuture<F: Future> {
+    receiver: async_oneshot::Receiver<F::Output>,
+    phantom_data: PhantomData<*const F>,
+}
 
-impl<T> Future for RecursedFuture<T> {
-    type Output = T;
+impl<F: Future> Future for DecursedFuture<F> {
+    type Output = F::Output;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         self.get_mut()
-            .0
+            .receiver
             .poll_unpin(cx)
             .map(|result| result.expect("the sender was dropped???"))
     }
 }
 
 pub trait FutureExt: Future {
-    fn decurse(self) -> RecursedFuture<Self::Output>;
+    type Decursed;
+    fn decurse(self) -> Self::Decursed;
 }
 
-impl<F: Future> FutureExt for F
-where
-    Self: 'static,
-{
-    fn decurse(self) -> RecursedFuture<F::Output> {
-        let (mut sender, receiver) = async_oneshot::oneshot();
+// my Linux crashes when I launch Chrome
+impl<F: Future> FutureExt for F {
+    type Decursed = DecursedFuture<F>;
+    fn decurse(self) -> DecursedFuture<F> {
+        let (sender, receiver) = async_oneshot::oneshot();
         if !DECURSER.is_set() {
             panic!(
                 "You can only decurse when inside a decursing context: run with `run_decursing`"
@@ -84,14 +100,11 @@ where
         }
         DECURSER.with(|decurser| {
             let mut decurser = decurser.borrow_mut();
-            decurser
-                .call_stack
-                .push(Rc::new(RefCell::new(Box::pin(self.map(move |result| {
-                    sender
-                        .send(result)
-                        .expect("the caller of decursed was dropped???")
-                })))));
+            decurser.call_stack.push(save_to_call_stack(sender, self));
         });
-        RecursedFuture(receiver)
+        DecursedFuture {
+            receiver,
+            phantom_data: PhantomData,
+        }
     }
 }
