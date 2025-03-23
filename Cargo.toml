@@ -2,6 +2,9 @@
 name = "decursion"
 version = "0.1.0"
 edition = "2021"
+description = "Write recursive algorithms without worrying about stack overflows"
+license = "MIT"
+repository = "https://github.com/kuviman/decursion"
 
 [dependencies]
 async-oneshot = "0.5.9"
